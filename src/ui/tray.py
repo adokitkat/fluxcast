@@ -49,12 +49,16 @@ _tray_image_cache: dict = {}
 _refresh_pending = False
 
 _wfd_peers: list = []
+_mice_sinks: list = []
+# mDNS hosts seen on the last MICE scan; None when python zeroconf is missing.
+_mice_candidates: int | None = 0
 _dlna_devices: list = []
 _cast_devices: list = []
 _monitors: list = []
 _selected_monitor_idx = 0
 
 _scanning_wfd = False
+_scanning_mice = False
 _scanning_dlna = False
 _scanning_cast = False
 _scanning_monitors = False
@@ -255,6 +259,34 @@ def _scan_wfd() -> None:
     _refresh()
 
 
+def _scan_mice() -> None:
+    global _mice_sinks, _mice_candidates, _scanning_mice
+    with _lock:
+        if _scanning_mice:
+            return
+        _scanning_mice = True
+    _refresh()
+    candidates = None
+    ready = []
+    try:
+        from wfd.mice import browse_candidates, probe_candidates
+        candidates = browse_candidates()
+        if candidates:
+            ready = probe_candidates(candidates)
+    except Exception as e:
+        _log(f"mice scan error: {e}")
+        candidates = []
+    with _lock:
+        _mice_sinks = ready
+        _mice_candidates = None if candidates is None else len(candidates)
+        _scanning_mice = False
+    if candidates is None:
+        _log("mice scan skipped: python zeroconf is not installed")
+    else:
+        _log(f"mice scan done: {len(ready)} ready of {len(candidates)} mDNS hosts")
+    _refresh()
+
+
 def _scan_dlna() -> None:
     global _dlna_devices, _scanning_dlna
     with _lock:
@@ -310,8 +342,8 @@ def _load_monitors() -> None:
 
 
 def _rescan_all() -> None:
-    _log("starting all 4 discovery threads")
-    for fn in (_scan_wfd, _scan_dlna, _scan_cast, _load_monitors):
+    _log("starting all 5 discovery threads")
+    for fn in (_scan_wfd, _scan_mice, _scan_dlna, _scan_cast, _load_monitors):
         threading.Thread(target=fn, daemon=True).start()
 
 
@@ -328,14 +360,22 @@ def _monitor_name(mode: str, selected) -> str | None:
     ) or (selected.name if selected is not None else None)
 
 
-def _start_wfd(peer, monitor) -> None:
-    cmd = [_PY, _MAIN, "--protocol", "wfd", "--wfd-peer", peer.address]
+def _wfd_cmd(target_args: list[str], monitor) -> list[str]:
+    cmd = [_PY, _MAIN, "--protocol", "wfd", *target_args]
     name = _monitor_name("wfd", monitor)
     # On non-Hyprland Wayland the WFD backend uses xdg-portal and shows its
     if name and not _wfd_uses_portal():
         cmd += ["--monitor", name]
-    cmd += _profile_args("wfd")
-    _launch(cmd, peer.name or peer.address)
+    return cmd + _profile_args("wfd")
+
+
+def _start_wfd(peer, monitor) -> None:
+    _launch(_wfd_cmd(["--wfd-peer", peer.address], monitor), peer.name or peer.address)
+
+
+def _start_mice(sink, monitor) -> None:
+    # A concrete address, not `--wfd-mice auto`: discovery there may prompt on stdin.
+    _launch(_wfd_cmd(["--wfd-mice", sink.address], monitor), sink.name or sink.address)
 
 
 def _start_dlna(device, monitor) -> None:
@@ -596,16 +636,53 @@ def _act(fn, *args):
     return handler
 
 
+def _mice_items(sinks: list, candidates: int | None, scanning: bool, can_start: bool, monitor) -> list:
+    """Entries of the Miracast-over-LAN submenu."""
+    if sinks:
+        if can_start:
+            items = [
+                pystray.MenuItem(f"{s.name}  ({s.address})", _act(_start_mice, s, monitor))
+                for s in sinks
+            ]
+        else:
+            items = [pystray.MenuItem(_l("Select a monitor first"), None, enabled=False)]
+    elif scanning:
+        return [pystray.MenuItem(_l("Scanning…"), None, enabled=False)]
+    elif candidates is None:
+        items = [pystray.MenuItem(_l("MICE discovery needs python zeroconf"), None, enabled=False)]
+    elif candidates:
+        # Hosts were seen over mDNS, but none listens on the MICE port. LG
+        # webOS can stop listening until its Wi-Fi reconnects.
+        items = [
+            pystray.MenuItem(_l("No device accepts MICE yet"), None, enabled=False),
+            pystray.MenuItem(_l("Turn the TV's Wi-Fi off and on, then rescan"), None, enabled=False),
+        ]
+    else:
+        items = [pystray.MenuItem(_l("No MICE devices found"), None, enabled=False)]
+    if scanning:
+        items.append(pystray.MenuItem(_l("↻ Refreshing…"), None, enabled=False))
+    else:
+        items.append(pystray.Menu.SEPARATOR)
+        items.append(pystray.MenuItem(
+            _l("Rescan LAN"),
+            lambda *_: threading.Thread(target=_scan_mice, daemon=True).start(),
+        ))
+    return items
+
+
 def _build_menu():
     with _lock:
         proc = _proc
         target = _cast_target
         peers = list(_wfd_peers)
+        mice = list(_mice_sinks)
+        mice_candidates = _mice_candidates
         dlna = list(_dlna_devices)
         cast_devs = list(_cast_devices)
         monitors = list(_monitors)
         sel_mon = _selected_monitor_idx
         sc_wfd = _scanning_wfd
+        sc_mice = _scanning_mice
         sc_dlna = _scanning_dlna
         sc_cast = _scanning_cast
         sc_mon = _scanning_monitors
@@ -657,6 +734,10 @@ def _build_menu():
             wfd_sub = pystray.Menu(pystray.MenuItem(_l("No WFD devices found"), None, enabled=False))
         wfd_label = _l("Cast via Miracast (WFD, portal dialog)   ") if wfd_via_portal else _l("Cast via Miracast (WFD)")
         items.append(pystray.MenuItem(wfd_label, wfd_sub))
+
+        mice_sub = pystray.Menu(*_mice_items(
+            mice, mice_candidates, sc_mice, wfd_via_portal or sel is not None, sel))
+        items.append(pystray.MenuItem(_l("Cast via Miracast over LAN (MICE)"), mice_sub))
 
         if dlna:
             if sel is not None:

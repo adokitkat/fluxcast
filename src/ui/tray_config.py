@@ -126,6 +126,9 @@ _MODE_OPTIONS = {
             _choice("auto", "portal", "wf-recorder", "x11grab", "gst-x11")
         ),
         "wfd-latency-log": _Option(_text),
+        "wfd-encoder": _Option(_choice("x264", "va")),
+        "wfd-rate-control": _Option(_choice("vbr", "cbr", "qvbr")),
+        "wfd-no-r2": _Option(_boolean, is_flag=True),
         "wfd-aosp-pmt-pid": _Option(_boolean, is_flag=True),
         "wfd-no-audio": _Option(_boolean, is_flag=True),
         "wfd-audio-device": _Option(_text),

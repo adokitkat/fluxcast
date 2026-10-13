@@ -120,6 +120,39 @@ wfd-go-intent = 0
         self.assertEqual(args, ["--wfd-aosp-pmt-pid", "--wfd-go-intent", "0"])
         self.assertEqual(warnings, [])
 
+    def test_loads_wfd_encoder_and_r2_options(self):
+        self._write(
+            """
+[wfd]
+wfd-encoder = VA
+wfd-rate-control = cbr
+wfd-no-r2 = true
+"""
+        )
+        warnings = []
+
+        args = tray_config.load_profile(
+            "wfd", config_path=self.config_path, warn=warnings.append
+        )
+
+        self.assertEqual(
+            args,
+            ["--wfd-encoder", "va", "--wfd-rate-control", "cbr", "--wfd-no-r2"],
+        )
+        self.assertEqual(warnings, [])
+
+    def test_mice_host_is_left_to_the_tray(self):
+        self._write("[wfd]\nwfd-mice = 192.168.1.50\nwfd-encoder = nvenc\n")
+        warnings = []
+
+        args = tray_config.load_profile(
+            "wfd", config_path=self.config_path, warn=warnings.append
+        )
+
+        self.assertEqual(args, [])
+        self.assertTrue(any("unknown option 'wfd-mice'" in item for item in warnings))
+        self.assertTrue(any("invalid value for 'wfd-encoder'" in item for item in warnings))
+
     def test_go_intent_out_of_range_warns(self):
         self._write("[wfd]\nwfd-go-intent = 16\n")
         warnings = []

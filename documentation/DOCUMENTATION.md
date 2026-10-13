@@ -54,6 +54,8 @@ python3 src/main.py --protocol cast
 
 - `--wfd-scan`
 - `--wfd-peer PEER`
+- `--wfd-mice [HOST]` cast over the LAN (Miracast over Infrastructure) instead of Wi-Fi Direct; without `HOST`, find the sink via mDNS
+- `--wfd-no-r2` do not negotiate WFD R2 formats
 - `--wfd-dry-run`
 - `--wfd-test-pattern`
 - `--wfd-ffmpeg-stats`
@@ -99,6 +101,7 @@ python3 src/main.py --protocol cast
   - Launches a system tray icon instead of a terminal session. Scan, select device and monitor, start/stop casting. All from the tray menu.
   - Requires `libappindicator` (Hyprland/KDE) or `gnome-shell-extension-appindicator` (GNOME).
   - On non-Hyprland Wayland (KDE, GNOME), WFD capture uses the xdg-desktop-portal screen picker dialog.
+  - **Cast via Miracast over LAN (MICE)** lists the TVs found over mDNS that accept MICE connections (TCP 7250). LG webOS TVs can stop accepting them until their Wi-Fi reconnects: turn the TV's Wi-Fi off and on, then use **Rescan LAN** in that submenu. Discovery needs the python `zeroconf` package (installed with `pychromecast`). The TV connects back on TCP 7236, which the firewall zone of the LAN must allow.
 
 #### Per-mode tray configuration
 
@@ -132,6 +135,9 @@ sections also accept `host`, `port`, `discover-timeout`, `transport`, and
 - `wfd-media-pipeline`
 - `wfd-capture-backend`
 - `wfd-latency-log`
+- `wfd-encoder`
+- `wfd-rate-control`
+- `wfd-no-r2`
 - `wfd-aosp-pmt-pid`
 - `wfd-no-audio`
 - `wfd-audio-device`
