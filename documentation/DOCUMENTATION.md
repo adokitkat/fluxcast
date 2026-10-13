@@ -101,6 +101,8 @@ python3 src/main.py --protocol cast
   - Launches a system tray icon instead of a terminal session. Scan, select device and monitor, start/stop casting. All from the tray menu.
   - Requires `libappindicator` (Hyprland/KDE) or `gnome-shell-extension-appindicator` (GNOME).
   - On non-Hyprland Wayland (KDE, GNOME), WFD capture uses the xdg-desktop-portal screen picker dialog.
+  - Only one tray runs per session: starting FluxCast again while the tray is up just shows a notification. **Exit** quits it; the launcher entry starts it again.
+  - **Start at Login** writes `~/.config/autostart/fluxcast.desktop` (unchecking it removes the file). The entry starts the same copy of FluxCast that created it: the AppImage, the installed `/usr/bin/fluxcast`, or the checkout's `main.py`.
   - **Cast via Miracast over LAN (MICE)** lists the TVs found over mDNS that accept MICE connections (TCP 7250). LG webOS TVs can stop accepting them until their Wi-Fi reconnects: turn the TV's Wi-Fi off and on, then use **Rescan LAN** in that submenu. Discovery needs the python `zeroconf` package (installed with `pychromecast`). The TV connects back on TCP 7236, which the firewall zone of the LAN must allow.
 
 #### Per-mode tray configuration

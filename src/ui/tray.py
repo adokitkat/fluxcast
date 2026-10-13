@@ -11,6 +11,7 @@ os.environ.setdefault("PYSTRAY_BACKEND", "appindicator")
 from PIL import Image, ImageChops, ImageDraw, ImageFilter
 import pystray
 
+from ui import autostart
 from ui.tray_config import load_preferred_monitor, load_profile
 
 # assets/ and main.py sit at the root of src/, one level above this package.
@@ -63,6 +64,7 @@ _scanning_dlna = False
 _scanning_cast = False
 _scanning_monitors = False
 _about_thread = None
+_instance_lock = None
 
 
 def _log(msg: str) -> None:
@@ -237,6 +239,15 @@ def _stop() -> None:
 def _on_exit(icon, item) -> None:
     _stop()
     icon.stop()
+
+
+def _toggle_autostart(icon, item) -> None:
+    try:
+        autostart.set_enabled(not autostart.is_enabled())
+    except OSError as e:
+        _log(f"autostart toggle failed: {e}")
+        _notify("FluxCast", _l("Could not change Start at Login: {error}").format(error=e))
+    _refresh()
 
 
 # ── discovery ─────────────────────────────────────────────────────────────────
@@ -783,6 +794,8 @@ def _build_menu():
         items.append(pystray.MenuItem(_l("Rescan Devices"), lambda *_: _rescan_all()))
 
     items.append(pystray.Menu.SEPARATOR)
+    items.append(pystray.MenuItem(
+        _l("Start at Login"), _toggle_autostart, checked=lambda item: autostart.is_enabled()))
     items.append(pystray.MenuItem(_l("About FluxCast"), lambda *_: _show_about()))
     items.append(pystray.MenuItem(_l("Exit"), _on_exit))
 
@@ -790,8 +803,13 @@ def _build_menu():
 
 
 def run_tray() -> None:
-    global _icon, _icon_state
+    global _icon, _icon_state, _instance_lock
     _log("run_tray() starting")
+    _instance_lock = autostart.acquire_tray_lock()
+    if _instance_lock is None:
+        _log("another FluxCast tray is already running; exiting")
+        _notify("FluxCast", _l("FluxCast is already running in the system tray."))
+        return
     _icon_state = _cast_state()
     icon = pystray.Icon(
         "FluxCast",
