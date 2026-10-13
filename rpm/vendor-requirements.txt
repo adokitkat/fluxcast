@@ -1,0 +1,9 @@
+# Bundled into /opt/fluxcast/vendor by the RPM (installed with --no-deps; the
+# rest comes from Fedora packages listed in fluxcast.spec).
+#   pychromecast, upnpclient: not packaged in Fedora
+#   protobuf: Fedora's python3-protobuf (3.19) is too old for pychromecast 14
+#   pystray: Fedora ships 0.17, FluxCast requires >= 0.19
+pychromecast==14.0.10
+upnpclient==2.0.3
+protobuf==7.36.2
+pystray==0.19.5
