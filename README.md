@@ -223,6 +223,27 @@ paru -S fluxcast
 
 `fluxcast` tracks the latest release. [`fluxcast-git`](https://aur.archlinux.org/packages/fluxcast-git) builds the current `main` instead, if you want to run ahead of a release.
 
+### Fedora - RPM (build from source)
+
+```bash
+sudo dnf install rpm-build desktop-file-utils python3-pip git
+rpm/build_rpm.sh     # -> dist/fluxcast-<version>-<release>.noarch.rpm
+rpm/install.sh       # install or upgrade
+```
+
+`rpm/install.sh` first offers to enable RPM Fusion, which has `x264enc` (the
+default H.264 encoder) and the GPU drivers that can encode H.264
+(`intel-media-driver`, `mesa-va-drivers-freeworld`), and then installs the RPM
+with dnf. The RPM installs the D-Bus policy, the launcher entry and the icon.
+The Python packages Fedora lacks or ships too old (`pychromecast`,
+`upnpclient`, `protobuf`, `pystray`) are bundled under `/opt/fluxcast/vendor`;
+everything else comes from Fedora.
+
+Remove it with `sudo dnf remove fluxcast`. This leaves only your tray settings
+in `~/.config/fluxcast/` and, if you enabled **Start at Login**,
+`~/.config/autostart/fluxcast.desktop`, which no longer runs anything once
+FluxCast is gone.
+
 ### From source
 
 ```bash

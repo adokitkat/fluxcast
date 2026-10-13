@@ -6,4 +6,10 @@
 PYTHON=/opt/fluxcast/venv/bin/python3
 [ -x "$PYTHON" ] || PYTHON=python3
 
+# The RPM puts the few dependencies Fedora lacks (or ships too old) here
+# instead; exported so the cast subprocesses the tray starts see them too.
+if [ -d /opt/fluxcast/vendor ]; then
+    export PYTHONPATH="/opt/fluxcast/vendor${PYTHONPATH:+:$PYTHONPATH}"
+fi
+
 exec "$PYTHON" /opt/fluxcast/main.py "$@"
