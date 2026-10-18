@@ -355,11 +355,19 @@ def _start_capture_portal(
         raise CaptureStartError("portal backend requires gst-launch-1.0")
 
     required = ("pipewiresrc", "videoconvert", "videoscale", "videorate",
-                "x264enc", "h264parse", "hlssink2")
+                "h264parse", "hlssink2")
     missing = [e for e in required if not _gst_has_element(e)]
     if missing:
         raise CaptureStartError(
             "portal backend requires missing GStreamer elements: " + ", ".join(missing)
+        )
+    from diagnostics import PORTAL_GST_H264_ENCODERS
+    h264_encoder = next(
+        (e for e in PORTAL_GST_H264_ENCODERS if _gst_has_element(e)), None)
+    if h264_encoder is None:
+        raise CaptureStartError(
+            "portal backend requires an H.264 encoder: "
+            + " or ".join(PORTAL_GST_H264_ENCODERS)
         )
 
     from .portal_capture import (
@@ -410,6 +418,21 @@ def _start_capture_portal(
     if not output_resolution:
         out_w, out_h = 1920, 1080
 
+    if h264_encoder == "openh264enc":
+        from wfd.gst import _gst_openh264enc_args
+        encoder_args = _gst_openh264enc_args(bitrate_kbits, fps)
+    else:
+        encoder_args = [
+            "tune=zerolatency",
+            "speed-preset=ultrafast",
+            f"bitrate={bitrate_kbits}",
+            f"key-int-max={fps}",
+            "threads=0",
+            "bframes=0",
+            "byte-stream=true",
+            "aud=true",
+        ]
+
     video_chain = [
         "pipewiresrc",
         f"fd={session.pw_fd}",
@@ -424,15 +447,8 @@ def _start_capture_portal(
         "!", "videoconvert",
         "!", "videoscale", "add-borders=false",
         "!", f"video/x-raw,width={out_w},height={out_h},format=I420,pixel-aspect-ratio=1/1",
-        "!", "x264enc",
-        "tune=zerolatency",
-        "speed-preset=ultrafast",
-        f"bitrate={bitrate_kbits}",
-        f"key-int-max={fps}",
-        "threads=0",
-        "bframes=0",
-        "byte-stream=true",
-        "aud=true",
+        "!", h264_encoder,
+        *encoder_args,
         "!", "h264parse", "config-interval=-1",
         "!", "video/x-h264,stream-format=byte-stream,alignment=au,profile=baseline",
         "!", "sink.video",

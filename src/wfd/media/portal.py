@@ -12,16 +12,16 @@ from ..config import WFDNotReady
 from ..dump import _process_written_bytes
 from ..encoding import (
     _bitrate_to_kbits, _calculate_gop, _fit_inside, _kbits_to_bitrate_text,
-    _effective_kbits, _parse_resolution, _vbv_bufsize, _x264_threads,
+    _effective_kbits, _parse_resolution, _x264_threads,
 )
 from ..env import _detect_audio_monitor
 from ..gst import (
-    _gst_dump_branch, _gst_has_element, _gst_pick_aac_encoder,
-    _gst_pipewiresrc_properties, _gst_rtp_link, _gst_vah264enc_rate_controls,
+    _gst_dump_branch, _gst_h264_caps_profile, _gst_has_element, _gst_openh264enc_args,
+    _gst_pick_aac_encoder, _gst_pipewiresrc_properties,
+    _gst_require_h264_encoder, _gst_rtp_link, _gst_vah264enc_rate_controls,
     _gst_x264enc_properties, _pipewiresrc_selector_attempts, _wfd_gst_prog_map,
 )
-from ..modes import _h264_level_for_mode
-from ..net import _ffmpeg_sender_args
+from ..net import _ffmpeg_h264_args, _ffmpeg_sender_args
 
 
 def _end_session_on_portal_revoke() -> None:
@@ -143,24 +143,7 @@ class PortalMixin:
                                   "setsar=1,format=yuv420p"]
         else:
             ffmpeg_cmd += ["-vf", "format=yuv420p"]
-        ffmpeg_cmd += [
-            "-c:v", "libx264",
-            "-preset", "ultrafast" if out_h > 1080 else "veryfast",
-            "-tune", "zerolatency",
-            "-threads", str(_x264_threads()),
-            "-profile:v", self.config.h264_profile,
-            "-level:v", _h264_level_for_mode(self.config),
-            "-pix_fmt", "yuv420p",
-            "-r", str(self.config.fps),
-            "-g", str(gop),
-            "-keyint_min", str(gop),
-            "-sc_threshold", "0",
-            "-bf", "0",
-            "-b:v", effective_bitrate,
-            "-maxrate", effective_bitrate,
-            "-bufsize", _vbv_bufsize(effective_bitrate, self.config),
-            "-x264-params", "repeat-headers=1:aud=1",
-        ]
+        ffmpeg_cmd += _ffmpeg_h264_args(self.config, out_h, effective_bitrate, gop)
         if not self.config.no_audio:
             ffmpeg_cmd += [
                 "-af", "aresample=async=1",
@@ -267,6 +250,12 @@ class PortalMixin:
                 "Portal backend is missing required GStreamer elements: "
                 + ", ".join(missing)
             )
+        use_va = (self.config.encoder == "va" and _gst_has_element("vah264enc")
+                  and _gst_has_element("vacompositor"))
+        if self.config.encoder == "va" and not use_va:
+            print("[FluxCast WFD Media] vah264enc/vacompositor not available; "
+                  "falling back to software encoding.")
+        h264_encoder = "vah264enc" if use_va else _gst_require_h264_encoder()
         monitor = self.config.monitor
         if self.config.output_resolution:
             out_res = self.config.output_resolution
@@ -320,10 +309,6 @@ class PortalMixin:
             not self.config.no_audio, self.config.aosp_pmt_pid
         )
         has_h264parse = _gst_has_element("h264parse")
-        use_va = (self.config.encoder == "va" and _gst_has_element("vah264enc")
-                  and _gst_has_element("vacompositor"))
-        if self.config.encoder == "va" and not use_va:
-            print("[FluxCast WFD Media] vah264enc/vacompositor not available; falling back to x264enc.")
         rate_control = self.config.rate_control
         if use_va and rate_control not in _gst_vah264enc_rate_controls():
             print(f"[FluxCast WFD Media] vah264enc does not offer {rate_control} on this driver; using vbr.")
@@ -349,71 +334,79 @@ class PortalMixin:
 
             is_lg = "LG" in self.config.peer_name.upper()
 
-            # x264enc configuration
-            encoder_args = [
-                "tune=zerolatency",
-                f"speed-preset={'ultrafast' if parsed_out[1] > 1080 else 'veryfast'}",
-                f"bitrate={bitrate_kbits}",
-                f"key-int-max={gop}",
-                #"intra-refresh=true",
-                f"threads={_x264_threads()}",
-                "bframes=0",
-                "byte-stream=true",
-                "aud=true",
-                "sliced-threads=true",
-            ]
+            encoder_args: list[str] = []
+            if h264_encoder == "openh264enc":
+                encoder_args = _gst_openh264enc_args(bitrate_kbits, gop)
+            elif h264_encoder == "x264enc":
+                # x264enc configuration
+                encoder_args = [
+                    "tune=zerolatency",
+                    f"speed-preset={'ultrafast' if parsed_out[1] > 1080 else 'veryfast'}",
+                    f"bitrate={bitrate_kbits}",
+                    f"key-int-max={gop}",
+                    #"intra-refresh=true",
+                    f"threads={_x264_threads()}",
+                    "bframes=0",
+                    "byte-stream=true",
+                    "aud=true",
+                    "sliced-threads=true",
+                ]
 
-            # Check x264enc properties once; same gst-plugins-ugly version
-            # either has all VBV params or none of them.
-            x264_props = _gst_x264enc_properties()
+                # Check x264enc properties once; same gst-plugins-ugly version
+                # either has all VBV params or none of them.
+                x264_props = _gst_x264enc_properties()
 
-            if "repeat-headers" in x264_props:
-                encoder_args.append("repeat-headers=true")
+                if "repeat-headers" in x264_props:
+                    encoder_args.append("repeat-headers=true")
 
-            opt_parts: list[str] = []
-            if "option-string" in x264_props:
-                opt_parts += ["scenecut=0", f"min-keyint={gop}"]
-            else:
-                print(
-                    "[FluxCast WFD Media] Portal: scenecut cannot be disabled "
-                    "(option-string unavailable); update gst-plugins-ugly to fix periodic artifacts."
-                )
-
-            if is_lg:
-                # Limit VBV rate via GObject/fallback to prevent IDR spikes overflowing LG's buffer.
-                lg_vbv: list[str] = []
-
-                if "rc-lookahead" in x264_props:
-                    lg_vbv.append("rc-lookahead=0")
-
-                if "vbv-maxrate" in x264_props:
-                    lg_vbv.insert(0, f"vbv-maxrate={bitrate_kbits}")
-                elif "option-string" in x264_props:
-                    opt_parts.append(f"vbv-maxrate={bitrate_kbits}")
-
-                if "vbv-buf-capacity" in x264_props:
-                    lg_vbv.append("vbv-buf-capacity=500")
-                elif "option-string" in x264_props:
-                    opt_parts.append(f"vbv-bufsize={bitrate_kbits // 2}")
-
-                encoder_args += lg_vbv
-                if "vbv-maxrate" not in x264_props and "option-string" not in x264_props:
-                    print(
-                        "[FluxCast WFD Media] LG profile: VBV rate cap unavailable; "
-                        "update gst-plugins-ugly for better LG compatibility."
-                    )
-            else:
-                if "vbv-buf-capacity" in x264_props:
-                    encoder_args.append("vbv-buf-capacity=200")
-                # vbv-maxrate not exposed as GObject property; mirrors ffmpeg's -maxrate.
+                opt_parts: list[str] = []
                 if "option-string" in x264_props:
-                    opt_parts.append(f"vbv-maxrate={bitrate_kbits}")
+                    opt_parts += ["scenecut=0", f"min-keyint={gop}"]
+                else:
+                    print(
+                        "[FluxCast WFD Media] Portal: scenecut cannot be disabled "
+                        "(option-string unavailable); update gst-plugins-ugly to fix periodic artifacts."
+                    )
 
-            if opt_parts:
-                encoder_args.append("option-string=" + ":".join(opt_parts))
+                if is_lg:
+                    # Limit VBV rate via GObject/fallback to prevent IDR spikes overflowing LG's buffer.
+                    lg_vbv: list[str] = []
+
+                    if "rc-lookahead" in x264_props:
+                        lg_vbv.append("rc-lookahead=0")
+
+                    if "vbv-maxrate" in x264_props:
+                        lg_vbv.insert(0, f"vbv-maxrate={bitrate_kbits}")
+                    elif "option-string" in x264_props:
+                        opt_parts.append(f"vbv-maxrate={bitrate_kbits}")
+
+                    if "vbv-buf-capacity" in x264_props:
+                        lg_vbv.append("vbv-buf-capacity=500")
+                    elif "option-string" in x264_props:
+                        opt_parts.append(f"vbv-bufsize={bitrate_kbits // 2}")
+
+                    encoder_args += lg_vbv
+                    if "vbv-maxrate" not in x264_props and "option-string" not in x264_props:
+                        print(
+                            "[FluxCast WFD Media] LG profile: VBV rate cap unavailable; "
+                            "update gst-plugins-ugly for better LG compatibility."
+                        )
+                else:
+                    if "vbv-buf-capacity" in x264_props:
+                        encoder_args.append("vbv-buf-capacity=200")
+                    # vbv-maxrate not exposed as GObject property; mirrors ffmpeg's -maxrate.
+                    if "option-string" in x264_props:
+                        opt_parts.append(f"vbv-maxrate={bitrate_kbits}")
+
+                if opt_parts:
+                    encoder_args.append("option-string=" + ":".join(opt_parts))
 
             # Inject in-band SPS/PPS before every IDR (mirrors ffmpeg repeat-headers=1).
-            h264_parse_chain = ["!", "h264parse", "config-interval=-1"] if has_h264parse else []
+            # openh264enc has no AUDs of its own, so it never runs without it.
+            h264_parse_chain = (
+                ["!", "h264parse", "config-interval=-1"]
+                if has_h264parse or h264_encoder == "openh264enc" else []
+            )
 
             if use_va:
                 # CPB of 500 ms for LG and 200 ms otherwise, matching the x264enc VBV above.
@@ -446,11 +439,11 @@ class PortalMixin:
                 encoder_chain = [
                     "!", "imagefreeze", "is-live=true", "allow-replace=true",
                     "!", "capsfilter", f"caps=video/x-raw,framerate={self.config.fps}/1",
-                    "!", "video/x-raw,format=I420", "!", "x264enc", *encoder_args,
+                    "!", "video/x-raw,format=I420", "!", h264_encoder, *encoder_args,
                 ]
             # x264enc's "baseline" output is Constrained Baseline; vah264enc
             # only negotiates that profile under its exact name.
-            caps_profile = self.config.h264_profile
+            caps_profile = _gst_h264_caps_profile(h264_encoder, self.config.h264_profile)
             if use_va and caps_profile == "baseline":
                 caps_profile = "constrained-baseline"
 
@@ -577,7 +570,7 @@ class PortalMixin:
             + ", ".join(name for name, _ in selector_attempts)
         )
         print("[FluxCast WFD Media] Pipeline             : gstreamer (portal->rtp)")
-        print(f"[FluxCast WFD Media] Video encoder        : {'vah264enc (VA-API)' if use_va else 'x264enc'}")
+        print(f"[FluxCast WFD Media] Video encoder        : {'vah264enc (VA-API)' if use_va else h264_encoder}")
         print(f"[FluxCast WFD Media] Portal source type      : {session.source_type}")
         if session.position and session.size:
             print(

@@ -249,12 +249,13 @@ and protocol selection remain controlled by the tray and cannot be set here.
   - `portal`: Wayland ScreenCast through xdg-desktop-portal (KDE/GNOME preferred path).
   - `wf-recorder`: recommended on Hyprland/wlroots.
   - `x11grab`: useful for X11 sessions.
-  - `gst-x11`: X11 capture routed through the GStreamer MPEG-TS pipeline (the same one the test pattern uses) instead of ffmpeg. Opt-in and never chosen by `auto`. Use it when a sink connects and streams but shows a black screen on the default ffmpeg path (confirmed on Hisense Vidaa). Requires `gst-launch-1.0`, `ximagesrc` (gst-plugins-good), and `x264enc` (gst-plugins-ugly).
+  - `gst-x11`: X11 capture routed through the GStreamer MPEG-TS pipeline (the same one the test pattern uses) instead of ffmpeg. Opt-in and never chosen by `auto`. Use it when a sink connects and streams but shows a black screen on the default ffmpeg path (confirmed on Hisense Vidaa). Requires `gst-launch-1.0`, `ximagesrc` (gst-plugins-good), and an H.264 encoder: `x264enc` (gst-plugins-ugly) or `openh264enc` with `h264parse` (gst-plugins-bad; Fedora: `gstreamer1-plugin-openh264`).
   - `portal` backend requirements: `dbus-next`, `xdg-desktop-portal`, desktop portal backend, and `gst-launch-1.0`.
+  - H.264 encoder: all WFD backends and the DLNA/Cast portal capture prefer x264 (`x264enc` / `libx264`) and fall back to Cisco OpenH264 (`openh264enc` / `libopenh264`) when x264 is missing. That is the case on stock Fedora, where x264 is only in RPM Fusion but OpenH264 comes from the default-enabled `fedora-cisco-openh264` repo. OpenH264 always sends Constrained Baseline, which every WFD sink decodes.
 - `--wfd-encoder`
   - H.264 encoder for the `portal` backend. Other backends ignore it.
-  - `x264` (default): software `x264enc`.
-  - `va`: GPU encoding through VA-API `vah264enc` (gst-plugins-bad), which uses far less CPU. Needs a VA-API driver with H.264 encode; on Fedora that is RPM Fusion's `intel-media-driver`, since Fedora's `libva-intel-media-driver` has no H.264. Falls back to `x264` when `vah264enc` is not available.
+  - `x264` (default): software `x264enc`, or `openh264enc` when `x264enc` is missing.
+  - `va`: GPU encoding through VA-API `vah264enc` (gst-plugins-bad), which uses far less CPU. Needs a VA-API driver with H.264 encode; on Fedora that is RPM Fusion's `intel-media-driver`, since Fedora's `libva-intel-media-driver` has no H.264. Falls back to the software encoder when `vah264enc` is not available.
 - `--wfd-rate-control`
   - Rate control for `--wfd-encoder va`. Ignored by `x264`.
   - `qvbr` (default): constant quality, up to `--bitrate`. Keeps keyframes close to x264's size; falls back to `vbr` when the VA driver does not offer it.

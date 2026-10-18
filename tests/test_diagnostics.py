@@ -407,16 +407,18 @@ class PortalGstElementsCheckTest(unittest.TestCase):
     def _everything(self):
         return (set(diagnostics.PORTAL_GST_VIDEO_ELEMENTS)
                 | set(diagnostics.PORTAL_GST_AUDIO_ELEMENTS)
-                | {"avenc_aac"})
+                | {"avenc_aac", "x264enc"})
 
     def test_reports_ok_and_names_the_chosen_aac_encoder(self):
         check = self._check(self._everything())
         self.assertEqual(check.status, diagnostics.STATUS_OK)
         self.assertIn("14 of 14 present", check.detail)
         self.assertIn("AAC encoder: avenc_aac", check.detail)
+        self.assertIn("H.264 encoder: x264enc", check.detail)
 
     def test_audio_elements_and_the_encoder_drop_out_without_audio(self):
-        check = self._check(set(diagnostics.PORTAL_GST_VIDEO_ELEMENTS), no_audio=True)
+        check = self._check(set(diagnostics.PORTAL_GST_VIDEO_ELEMENTS) | {"x264enc"},
+                            no_audio=True)
         self.assertEqual(check.status, diagnostics.STATUS_OK)
         self.assertIn("9 of 9 present", check.detail)
         self.assertNotIn("AAC", check.detail)
@@ -449,6 +451,28 @@ class PortalGstElementsCheckTest(unittest.TestCase):
         check = self._check(present)
         self.assertIn("AAC encoder: fdkaacenc", check.detail)
 
+    def test_openh264_stands_in_for_x264_on_stock_fedora(self):
+        """x264enc is RPM Fusion only on Fedora; openh264enc is in the default
+        fedora-cisco-openh264 repo."""
+        present = (self._everything() - {"x264enc"}) | {"openh264enc", "h264parse"}
+        check = self._check(present)
+        self.assertEqual(check.status, diagnostics.STATUS_OK)
+        self.assertIn("H.264 encoder: openh264enc", check.detail)
+
+    def test_openh264_without_h264parse_does_not_count(self):
+        """Without h264parse the stream has no AUDs, which WFD sinks need."""
+        present = (self._everything() - {"x264enc", "h264parse"}) | {"openh264enc"}
+        check = self._check(present)
+        self.assertEqual(check.status, diagnostics.STATUS_WARN)
+        self.assertIn("an H.264 encoder", check.message)
+        self.assertIn("missing 1 of 14", check.message)
+        self.assertIn("gstreamer1-plugin-openh264", check.detail)
+
+    def test_x264_is_preferred_when_both_encoders_exist(self):
+        present = self._everything() | {"openh264enc", "h264parse"}
+        check = self._check(present)
+        self.assertIn("H.264 encoder: x264enc", check.detail)
+
     def test_unverifiable_elements_are_not_reported_as_missing(self):
         """A gst-inspect timeout must not tell users to install something they
         may already have."""
@@ -468,7 +492,9 @@ class PortalGstElementsCheckTest(unittest.TestCase):
     def test_every_element_has_an_install_hint(self):
         for element in (diagnostics.PORTAL_GST_VIDEO_ELEMENTS
                         + diagnostics.PORTAL_GST_AUDIO_ELEMENTS
-                        + diagnostics.PORTAL_GST_AAC_ENCODERS):
+                        + diagnostics.PORTAL_GST_AAC_ENCODERS
+                        + diagnostics.PORTAL_GST_H264_ENCODERS
+                        + (diagnostics.OPENH264_REQUIRES,)):
             self.assertIn(element, diagnostics._GST_ELEMENT_PACKAGES,
                           f"{element} would report 'unknown package'")
 

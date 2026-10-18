@@ -6,15 +6,15 @@ import time
 from ..config import WFDNotReady
 from ..encoding import (
     _bitrate_to_kbits, _calculate_gop, _kbits_to_bitrate_text, _letterbox_vf,
-    _effective_kbits, _parse_resolution, _vbv_bufsize, _x264_threads,
+    _effective_kbits, _parse_resolution, _x264_threads,
 )
 from ..env import _detect_audio_monitor
 from ..gst import (
-    _gst_dump_branch, _gst_has_element, _gst_pick_aac_encoder, _gst_rtp_link,
+    _gst_dump_branch, _gst_h264_caps_profile, _gst_has_element, _gst_openh264enc_args,
+    _gst_pick_aac_encoder, _gst_require_h264_encoder, _gst_rtp_link,
     _wfd_gst_prog_map,
 )
-from ..modes import _h264_level_for_mode
-from ..net import _ffmpeg_sender_args
+from ..net import _ffmpeg_h264_args, _ffmpeg_sender_args
 
 
 class X11Mixin:
@@ -64,24 +64,8 @@ class X11Mixin:
         else:
             ffmpeg_cmd += ["-vf", _letterbox_vf(out_res)]
 
-        ffmpeg_cmd += [
-            "-c:v", "libx264",
-            "-preset", "ultrafast" if parsed_out[1] > 1080 else "veryfast",
-            "-tune", "zerolatency",
-            "-threads", str(_x264_threads()),
-            "-profile:v", self.config.h264_profile,
-            "-level:v", _h264_level_for_mode(self.config),
-            "-pix_fmt", "yuv420p",
-            "-r", str(self.config.fps),
-            "-g", str(gop),
-            "-keyint_min", str(gop),
-            "-sc_threshold", "0",
-            "-bf", "0",
-            "-b:v", effective_bitrate,
-            "-maxrate", effective_bitrate,
-            "-bufsize", _vbv_bufsize(effective_bitrate, self.config),
-            "-x264-params", "repeat-headers=1:aud=1",
-        ]
+        ffmpeg_cmd += _ffmpeg_h264_args(
+            self.config, parsed_out[1], effective_bitrate, gop)
 
         if not self.config.no_audio:
             ffmpeg_cmd += [
@@ -126,15 +110,16 @@ class X11Mixin:
             raise WFDNotReady("gst-x11 backend requires a selected monitor.")
 
         required = ["ximagesrc", "videoconvert", "videoscale",
-                    "x264enc", "mpegtsmux", "rtpmp2tpay", "udpsink"]
+                    "mpegtsmux", "rtpmp2tpay", "udpsink"]
         if not self.config.no_audio:
             required += ["pulsesrc", "audioconvert", "audioresample", "aacparse"]
         missing = [name for name in required if not _gst_has_element(name)]
         if missing:
             raise WFDNotReady(
                 "gst-x11 backend is missing GStreamer elements: " + ", ".join(missing)
-                + " (ximagesrc/videoscale are in gst-plugins-good, x264enc in gst-plugins-ugly)."
+                + " (ximagesrc/videoscale are in gst-plugins-good)."
             )
+        h264_encoder = _gst_require_h264_encoder()
 
         src_w, src_h = monitor.width, monitor.height
         out_res = self.config.output_resolution or f"{src_w}x{src_h}"
@@ -154,6 +139,27 @@ class X11Mixin:
         prog_map = _wfd_gst_prog_map(
             not self.config.no_audio, self.config.aosp_pmt_pid
         )
+
+        if h264_encoder == "openh264enc":
+            # openh264enc writes no AUDs; h264parse adds them.
+            encoder_chain = [
+                "openh264enc", *_gst_openh264enc_args(bitrate_kbits, gop),
+                "!", "h264parse", "config-interval=-1",
+            ]
+        else:
+            encoder_chain = [
+                "x264enc",
+                "tune=zerolatency",
+                f"speed-preset={'ultrafast' if out_h > 1080 else 'veryfast'}",
+                f"bitrate={bitrate_kbits}",
+                f"key-int-max={gop}",
+                "bframes=0",
+                "byte-stream=true",
+                "aud=true",
+                f"threads={_x264_threads()}",
+                "sliced-threads=true",
+                "vbv-buf-capacity=200",
+            ]
 
         # identical to the test pipeline, except for the video (ximagesrc) and audio (pulsesrc) sources.
         cmd = [
@@ -184,18 +190,9 @@ class X11Mixin:
             "!", f"video/x-raw,width={out_w},height={out_h},pixel-aspect-ratio=1/1",
             "!", "videoconvert",
             "!", "video/x-raw,format=I420",
-            "!", "x264enc",
-            "tune=zerolatency",
-            f"speed-preset={'ultrafast' if out_h > 1080 else 'veryfast'}",
-            f"bitrate={bitrate_kbits}",
-            f"key-int-max={gop}",
-            "bframes=0",
-            "byte-stream=true",
-            "aud=true",
-            f"threads={_x264_threads()}",
-            "sliced-threads=true",
-            "vbv-buf-capacity=200",
-            "!", f"video/x-h264,stream-format=byte-stream,alignment=au,profile={self.config.h264_profile}",
+            "!", *encoder_chain,
+            "!", "video/x-h264,stream-format=byte-stream,alignment=au,profile="
+            + _gst_h264_caps_profile(h264_encoder, self.config.h264_profile),
             "!", "queue",
             "!", "mux.sink_4113",
         ]

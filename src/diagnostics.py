@@ -35,13 +35,20 @@ _GST_BAD_PACKAGES = ("gstreamer1.0-plugins-bad (Arch: gst-plugins-bad; "
 # reverse, so the shared copy lives on this side.
 PORTAL_GST_VIDEO_ELEMENTS = (
     "pipewiresrc", "videoconvert", "videoscale", "videorate", "imagefreeze",
-    "x264enc", "mpegtsmux", "rtpmp2tpay", "udpsink",
+    "mpegtsmux", "rtpmp2tpay", "udpsink",
 )
 PORTAL_GST_AUDIO_ELEMENTS = (
     "pulsesrc", "audioconvert", "audioresample", "aacparse",
 )
 # Tried in this order by _gst_pick_aac_encoder, which needs exactly one of them.
 PORTAL_GST_AAC_ENCODERS = ("fdkaacenc", "avenc_aac", "voaacenc", "faac")
+# Tried in this order by _gst_pick_h264_encoder. openh264enc is Cisco's
+# OpenH264, which stock Fedora ships from its default-enabled
+# fedora-cisco-openh264 repo, so H.264 works there without RPM Fusion.
+PORTAL_GST_H264_ENCODERS = ("x264enc", "openh264enc")
+# openh264enc writes no access unit delimiters, which WFD sinks rely on;
+# h264parse inserts them, so openh264enc only counts when this is present.
+OPENH264_REQUIRES = "h264parse"
 
 # What to install when an element is absent. Read off the apt indexes'
 # Gstreamer-Elements fields on Ubuntu 26.04 with GStreamer 1.28, because the
@@ -64,8 +71,11 @@ _GST_ELEMENT_PACKAGES = {
     "voaacenc": _GST_BAD_PACKAGES,
     "x264enc": "gstreamer1.0-plugins-ugly (Arch: gst-plugins-ugly; "
                "Fedora: gstreamer1-plugins-ugly, RPM Fusion)",
+    "openh264enc": "gstreamer1.0-plugins-bad (Arch: gst-plugins-bad; "
+                   "Fedora: gstreamer1-plugin-openh264)",
+    "h264parse": _GST_BAD_PACKAGES,
     "avenc_aac": "gstreamer1.0-libav (Arch: gst-libav; "
-                 "Fedora: gstreamer1-libav, RPM Fusion)",
+                 "Fedora: gstreamer1-plugin-libav)",
     "fdkaacenc": "gstreamer1.0-fdkaac (Arch: gst-plugins-bad; "
                  "Fedora: gstreamer1-plugins-bad-free)",
     "faac": "not packaged for Debian/Ubuntu (Arch: gst-plugins-bad)",
@@ -171,6 +181,8 @@ def _wf_recorder_check() -> Check:
 
 # Stands in for "any one of PORTAL_GST_AAC_ENCODERS" in the missing list.
 _AAC_ENCODER_LABEL = "an AAC encoder"
+# Likewise for PORTAL_GST_H264_ENCODERS.
+_H264_ENCODER_LABEL = "an H.264 encoder"
 
 
 def _gst_element_present(gst_inspect: str, element: str) -> Optional[bool]:
@@ -189,6 +201,10 @@ def _gst_install_hint(elements: list[str]) -> str:
         if element == _AAC_ENCODER_LABEL:
             package = (f"any of {', '.join(PORTAL_GST_AAC_ENCODERS)} - "
                        f"{_GST_ELEMENT_PACKAGES['avenc_aac']} is the most widely available")
+        elif element == _H264_ENCODER_LABEL:
+            package = (f"x264enc from {_GST_ELEMENT_PACKAGES['x264enc']}, or "
+                       f"openh264enc + {OPENH264_REQUIRES} from "
+                       f"{_GST_ELEMENT_PACKAGES['openh264enc']}")
         else:
             package = _GST_ELEMENT_PACKAGES.get(element, "unknown package")
         by_package.setdefault(package, []).append(element)
@@ -200,15 +216,16 @@ def _portal_gst_elements_check(no_audio: bool = False) -> Check:
     """Check every element the portal backend enforces, not a hand-picked pair.
 
     The backend preflight reads the same tuples from this module, so the report
-    and the runtime requirement cannot drift apart again (#129). The AAC encoder
-    counts as one requirement satisfied by any of several elements, which is how
-    _gst_pick_aac_encoder resolves it.
+    and the runtime requirement cannot drift apart again (#129). The AAC and
+    H.264 encoders each count as one requirement satisfied by any of several
+    elements, which is how _gst_pick_aac_encoder and _gst_pick_h264_encoder
+    resolve them.
     """
     name = "portal gst elements"
     required = list(PORTAL_GST_VIDEO_ELEMENTS)
     if not no_audio:
         required += list(PORTAL_GST_AUDIO_ELEMENTS)
-    total = len(required) + (0 if no_audio else 1)
+    total = len(required) + 1 + (0 if no_audio else 1)
 
     gst_inspect = shutil.which("gst-inspect-1.0")
     if not gst_inspect:
@@ -237,6 +254,17 @@ def _portal_gst_elements_check(no_audio: bool = False) -> Check:
         else:
             missing.append(_AAC_ENCODER_LABEL)
 
+    chosen_h264 = ""
+    for encoder in PORTAL_GST_H264_ENCODERS:
+        if (encoder == "openh264enc"
+                and not _gst_element_present(gst_inspect, OPENH264_REQUIRES)):
+            continue
+        if _gst_element_present(gst_inspect, encoder):
+            chosen_h264 = encoder
+            break
+    else:
+        missing.append(_H264_ENCODER_LABEL)
+
     if missing:
         detail = _gst_install_hint(missing)
         if unverified:
@@ -256,7 +284,7 @@ def _portal_gst_elements_check(no_audio: bool = False) -> Check:
             "gst-inspect-1.0 did not answer; the portal backend may still fail to start",
         )
 
-    detail = f"{total} of {total} present"
+    detail = f"{total} of {total} present; H.264 encoder: {chosen_h264}"
     if chosen_encoder:
         detail += f"; AAC encoder: {chosen_encoder}"
     return Check(name, STATUS_OK, "Wayland portal GStreamer pipeline", detail)
@@ -295,6 +323,7 @@ def _ffmpeg_encoders() -> Check:
     encoders = result.stdout + result.stderr
     h264_candidates = [
         "libx264",
+        "libopenh264",
         "h264_vaapi",
         "h264_nvenc",
         "h264_qsv",
@@ -321,7 +350,7 @@ def _ffmpeg_encoders() -> Check:
         "ffmpeg encoders",
         STATUS_FAIL,
         "no usable H.264 encoder detected",
-        "need libx264 or a hardware H.264 encoder",
+        "need libx264 or libopenh264 for the ffmpeg-based senders",
     )
 
 

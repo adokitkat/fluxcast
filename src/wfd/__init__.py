@@ -60,7 +60,7 @@ from .env import _detect_audio_monitor, _is_hyprland_session, _is_wayland_sessio
 
 
 
-from .gst import _gst_has_element, _wfd_gst_prog_map, _gst_rtp_link, _gst_dump_branch, _gst_wfd_sender_available, _gst_pipewiresrc_properties, _gst_x264enc_props_cache, _gst_x264enc_properties, _pipewiresrc_selector_attempts, _gst_pick_aac_encoder
+from .gst import _gst_has_element, _wfd_gst_prog_map, _gst_rtp_link, _gst_dump_branch, _gst_wfd_sender_available, _gst_pipewiresrc_properties, _gst_x264enc_props_cache, _gst_x264enc_properties, _pipewiresrc_selector_attempts, _gst_pick_aac_encoder, _gst_pick_h264_encoder, _gst_require_h264_encoder, _gst_openh264enc_args, _gst_h264_caps_profile
 
 
 
@@ -128,7 +128,7 @@ from .latency import _append_latency_log
 
 
 
-from .net import _safe_source_port, _rtp_url, _interface_for_ip, _netdev_tx_bytes, _ffmpeg_sender_args
+from .net import _safe_source_port, _rtp_url, _interface_for_ip, _netdev_tx_bytes, _ffmpeg_sender_args, _ffmpeg_h264_encoder, _ffmpeg_h264_args
 
 
 

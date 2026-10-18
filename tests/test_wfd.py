@@ -397,7 +397,8 @@ class AspectRatioTest(unittest.TestCase):
 
 def _gst_commands(size=(1080, 1920), encoder="x264", has_va=True, rate_control="qvbr",
                   dmabuf_fails=False, va_rate_controls=("cbr", "vbr", "qvbr"),
-                  source_type=1, pw_props=frozenset(), ffmpeg=False):
+                  source_type=1, pw_props=frozenset(), absent_elements=frozenset(),
+                  backends=("gst_x11", "portal", "portal_ffmpeg"), ffmpeg=False):
     """Generated gst argv for every WFD pipeline that scales."""
     class Mon:
         name, width, height, x, y, display = "eDP-1", 1080, 1920, 0, 0, ":0"
@@ -448,7 +449,10 @@ def _gst_commands(size=(1080, 1920), encoder="x264", has_va=True, rate_control="
     pipeline.tx_interface = "lo"
     with (
         mock.patch.object(wfd.shutil, "which", side_effect=lambda n: "/usr/bin/" + n),
-        patch_all("_gst_has_element", side_effect=lambda n: has_va or n != "vah264enc"),
+        patch_all("_gst_has_element",
+                  side_effect=lambda n: (has_va or n != "vah264enc")
+                  and n not in absent_elements),
+        patch_all("_ffmpeg_h264_encoder", return_value="libx264"),
         patch_all("_detect_audio_monitor", return_value="m"),
         patch_all("_gst_pipewiresrc_properties", return_value=set(pw_props)),
         patch_all("_gst_x264enc_properties", return_value=set()),
@@ -464,10 +468,13 @@ def _gst_commands(size=(1080, 1920), encoder="x264", has_va=True, rate_control="
         mock.patch.object(wfd.time, "sleep"),
         contextlib.redirect_stdout(io.StringIO()),
     ):
-        pipeline._start_desktop_gst_x11()
-        pipeline._start_desktop_portal()
-        config.aosp_pmt_pid = True
-        pipeline._start_desktop_portal_ffmpeg()
+        if "gst_x11" in backends:
+            pipeline._start_desktop_gst_x11()
+        if "portal" in backends:
+            pipeline._start_desktop_portal()
+        if "portal_ffmpeg" in backends:
+            config.aosp_pmt_pid = True
+            pipeline._start_desktop_portal_ffmpeg()
     if ffmpeg:
         return [c for c in captured if "libx264" in c]
     return [c for c in captured if c and c[0].startswith("gst-launch")]
@@ -590,6 +597,127 @@ class PortalVaEncoderTest(unittest.TestCase):
         portal = self._portal(encoder="va", has_va=False)
         self.assertIn("x264enc", portal)
         self.assertNotIn("vah264enc", portal)
+
+    def test_va_encoder_falls_back_to_openh264enc_without_x264(self):
+        portal = self._portal(encoder="va", has_va=False, absent_elements={"x264enc"})
+        self.assertIn("openh264enc", portal)
+        self.assertNotIn("vah264enc", portal)
+        caps = next(a for a in portal if a.startswith("video/x-h264"))
+        self.assertTrue(caps.endswith("profile=baseline"))
+
+    def test_va_needs_no_software_encoder(self):
+        """A VA-only host must not be stopped by the software encoder check."""
+        portal = self._portal(encoder="va", backends=("portal",),
+                              absent_elements={"x264enc", "openh264enc"})
+        self.assertIn("vah264enc", portal)
+        self.assertNotIn("x264enc", portal)
+        self.assertNotIn("openh264enc", portal)
+
+
+class OpenH264FallbackTest(unittest.TestCase):
+    """Stock Fedora has openh264enc / libopenh264 but no x264 without RPM Fusion."""
+
+    def _openh264_commands(self):
+        # The portal->ffmpeg path also starts a raw pipewiresrc producer, which
+        # does not encode; only the pipelines that mux to MPEG-TS do.
+        return [cmd for cmd in _gst_commands(absent_elements={"x264enc"})
+                if "mpegtsmux" in cmd]
+
+    def test_every_gst_pipeline_falls_back_to_openh264enc(self):
+        commands = self._openh264_commands()
+        self.assertEqual(len(commands), 2)  # gst-x11 and portal
+        for cmd in commands:
+            self.assertNotIn("x264enc", cmd)
+            self.assertIn("openh264enc", cmd)
+
+    def test_openh264enc_is_always_followed_by_h264parse(self):
+        """openh264enc writes no AUDs; h264parse adds them."""
+        for cmd in self._openh264_commands():
+            encoder = cmd.index("openh264enc")
+            parse = cmd.index("h264parse")
+            self.assertGreater(parse, encoder)
+            self.assertEqual(cmd[encoder:parse].count("!"), 1)
+
+    def test_openh264enc_holds_the_bitrate_and_the_gop(self):
+        for cmd in self._openh264_commands():
+            self.assertIn("qp-min=10", cmd)
+            self.assertIn("scene-change-detection=false", cmd)
+            self.assertIn("enable-frame-skip=false", cmd)
+            self.assertTrue(any(arg.startswith("gop-size=") for arg in cmd))
+
+    def test_x264_settings_do_not_leak_into_openh264enc(self):
+        for cmd in self._openh264_commands():
+            self.assertNotIn("tune=zerolatency", cmd)
+            self.assertFalse(any(arg.startswith("speed-preset=") for arg in cmd))
+
+    def test_a_chp_sink_still_gets_baseline_caps_from_openh264enc(self):
+        """openh264enc cannot output High; profile=high caps never negotiate."""
+        self.assertEqual(wfd._gst_h264_caps_profile("openh264enc", "high"), "baseline")
+        self.assertEqual(wfd._gst_h264_caps_profile("x264enc", "high"), "high")
+        for cmd in self._openh264_commands():
+            caps = [arg for arg in cmd if arg.startswith("video/x-h264")]
+            self.assertEqual(len(caps), 1)
+            self.assertTrue(caps[0].endswith("profile=baseline"))
+
+    def test_no_gst_h264_encoder_is_a_clear_error(self):
+        with patch_all("_gst_has_element",
+                       side_effect=lambda name: name not in ("x264enc", "openh264enc")):
+            with self.assertRaises(wfd.WFDNotReady) as raised:
+                wfd._gst_require_h264_encoder()
+        self.assertIn("openh264enc", str(raised.exception))
+
+    def test_openh264enc_needs_h264parse_to_be_picked(self):
+        with patch_all("_gst_has_element",
+                       side_effect=lambda name: name not in ("x264enc", "h264parse")):
+            self.assertIsNone(wfd._gst_pick_h264_encoder())
+
+
+class FfmpegH264EncoderTest(unittest.TestCase):
+    def setUp(self):
+        net = sys.modules["wfd.net"]
+        self.addCleanup(setattr, net, "_ffmpeg_h264_encoder_cache", None)
+        net._ffmpeg_h264_encoder_cache = None
+        self.net = net
+
+    def _encoder_with(self, listing):
+        result = mock.Mock(stdout=listing)
+        with (
+            mock.patch.object(self.net.shutil, "which", return_value="/usr/bin/ffmpeg"),
+            mock.patch.object(self.net, "_run", return_value=result),
+        ):
+            return self.net._ffmpeg_h264_encoder()
+
+    def test_libx264_wins_when_both_exist(self):
+        listing = (" V....D libopenh264          OpenH264 H.264\n"
+                   " V....D libx264              libx264 H.264\n")
+        self.assertEqual(self._encoder_with(listing), "libx264")
+
+    def test_ffmpeg_free_falls_back_to_libopenh264(self):
+        listing = " V....D libopenh264          OpenH264 H.264\n"
+        self.assertEqual(self._encoder_with(listing), "libopenh264")
+
+    def test_an_unreadable_listing_keeps_libx264(self):
+        self.assertEqual(self._encoder_with(""), "libx264")
+
+    def test_libopenh264_args(self):
+        config = wfd.WFDMediaConfig(monitor=None, output_resolution="1920x1080", fps=60)
+        config.h264_profile = "baseline"
+        self.net._ffmpeg_h264_encoder_cache = "libopenh264"
+        args = wfd._ffmpeg_h264_args(config, 1080, "12M", 60)
+        self.assertEqual(args[args.index("-c:v") + 1], "libopenh264")
+        # libopenh264 rejects plain "baseline".
+        self.assertEqual(args[args.index("-profile:v") + 1], "constrained_baseline")
+        self.assertEqual(args[args.index("-allow_skip_frames") + 1], "0")
+        self.assertNotIn("-x264-params", args)
+        self.assertNotIn("-preset", args)
+
+    def test_libx264_args_are_unchanged(self):
+        config = wfd.WFDMediaConfig(monitor=None, output_resolution="1920x1080", fps=60)
+        self.net._ffmpeg_h264_encoder_cache = "libx264"
+        args = wfd._ffmpeg_h264_args(config, 1080, "12M", 60)
+        self.assertEqual(args[args.index("-c:v") + 1], "libx264")
+        self.assertEqual(args[args.index("-x264-params") + 1], "repeat-headers=1:aud=1")
+        self.assertEqual(args[args.index("-sc_threshold") + 1], "0")
 
 
 def _sequence(values):

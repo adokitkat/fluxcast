@@ -2,6 +2,9 @@ import shutil
 import subprocess
 from typing import Optional
 
+from .config import WFDMediaConfig
+from .encoding import _vbv_bufsize, _x264_threads
+from .modes import _h264_level_for_mode
 from .proc import _run
 
 
@@ -82,3 +85,74 @@ def _ffmpeg_sender_args(show_stats: bool = False) -> list[str]:
     if show_stats:
         args.append("-stats")
     return args
+
+
+_ffmpeg_h264_encoder_cache: Optional[str] = None
+
+def _ffmpeg_h264_encoder() -> str:
+    """libx264 when ffmpeg has it, else libopenh264 when it has that.
+
+    Fedora's ffmpeg-free has no libx264 but does have libopenh264, backed by
+    Cisco's OpenH264 from the default-enabled fedora-cisco-openh264 repo. If
+    the encoder list cannot be read, this stays on libx264 as before.
+    """
+    global _ffmpeg_h264_encoder_cache
+    if _ffmpeg_h264_encoder_cache is not None:
+        return _ffmpeg_h264_encoder_cache
+    encoders: set[str] = set()
+    ffmpeg = shutil.which("ffmpeg")
+    if ffmpeg:
+        try:
+            output = _run([ffmpeg, "-hide_banner", "-encoders"]).stdout
+        except (OSError, subprocess.TimeoutExpired):
+            output = ""
+        for line in output.splitlines():
+            fields = line.split()
+            if len(fields) >= 2 and fields[0].startswith("V"):
+                encoders.add(fields[1])
+    if "libx264" not in encoders and "libopenh264" in encoders:
+        _ffmpeg_h264_encoder_cache = "libopenh264"
+    else:
+        _ffmpeg_h264_encoder_cache = "libx264"
+    return _ffmpeg_h264_encoder_cache
+
+def _ffmpeg_h264_args(config: WFDMediaConfig, out_height: int,
+                      bitrate: str, gop: int) -> list[str]:
+    """The -c:v block every ffmpeg WFD sender uses, for whichever encoder exists."""
+    if _ffmpeg_h264_encoder() == "libopenh264":
+        return [
+            "-c:v", "libopenh264",
+            # libopenh264 rejects plain "baseline"; it only produces the
+            # constrained subset, which is what WFD sinks get from x264 too.
+            "-profile:v", ("constrained_baseline" if config.h264_profile == "baseline"
+                           else config.h264_profile),
+            "-level:v", _h264_level_for_mode(config),
+            "-pix_fmt", "yuv420p",
+            "-r", str(config.fps),
+            # IDRs land only on the GOP boundary; libopenh264 exposes no
+            # scene-cut switch and needs none. SPS/PPS precede every IDR, and
+            # the mpegts muxer adds the access unit delimiters x264 writes.
+            "-g", str(gop),
+            "-b:v", bitrate,
+            "-maxrate", bitrate,
+            "-rc_mode", "bitrate",
+            "-allow_skip_frames", "0",
+        ]
+    return [
+        "-c:v", "libx264",
+        "-preset", "ultrafast" if out_height > 1080 else "veryfast",
+        "-tune", "zerolatency",
+        "-threads", str(_x264_threads()),
+        "-profile:v", config.h264_profile,
+        "-level:v", _h264_level_for_mode(config),
+        "-pix_fmt", "yuv420p",
+        "-r", str(config.fps),
+        "-g", str(gop),
+        "-keyint_min", str(gop),
+        "-sc_threshold", "0",
+        "-bf", "0",
+        "-b:v", bitrate,
+        "-maxrate", bitrate,
+        "-bufsize", _vbv_bufsize(bitrate, config),
+        "-x264-params", "repeat-headers=1:aud=1",
+    ]

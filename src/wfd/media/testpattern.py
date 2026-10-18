@@ -4,14 +4,14 @@ import time
 
 from ..config import WFDNotReady
 from ..encoding import (
-    _bitrate_to_kbits, _calculate_gop, _parse_resolution, _vbv_bufsize, _x264_threads,
+    _bitrate_to_kbits, _calculate_gop, _parse_resolution, _x264_threads,
 )
 from ..gst import (
-    _gst_dump_branch, _gst_has_element, _gst_pick_aac_encoder, _gst_rtp_link,
+    _gst_dump_branch, _gst_h264_caps_profile, _gst_has_element, _gst_openh264enc_args,
+    _gst_pick_aac_encoder, _gst_require_h264_encoder, _gst_rtp_link,
     _gst_wfd_sender_available, _wfd_gst_prog_map,
 )
-from ..modes import _h264_level_for_mode
-from ..net import _ffmpeg_sender_args
+from ..net import _ffmpeg_h264_args, _ffmpeg_sender_args
 
 
 class TestPatternMixin:
@@ -40,24 +40,7 @@ class TestPatternMixin:
         else:
             cmd += ["-map", "0:v:0"]
 
-        cmd += [
-            "-c:v", "libx264",
-            "-preset", "ultrafast" if _tp_h > 1080 else "veryfast",
-            "-tune", "zerolatency",
-            "-threads", str(_x264_threads()),
-            "-profile:v", self.config.h264_profile,
-            "-level:v", _h264_level_for_mode(self.config),
-            "-pix_fmt", "yuv420p",
-            "-r", str(self.config.fps),
-            "-g", str(gop),
-            "-keyint_min", str(gop),
-            "-sc_threshold", "0",
-            "-bf", "0",
-            "-b:v", self.config.bitrate,
-            "-maxrate", self.config.bitrate,
-            "-bufsize", _vbv_bufsize(self.config.bitrate, self.config),
-            "-x264-params", "repeat-headers=1:aud=1",
-        ]
+        cmd += _ffmpeg_h264_args(self.config, _tp_h, self.config.bitrate, gop)
 
         if not self.config.no_audio:
             cmd += [
@@ -86,8 +69,10 @@ class TestPatternMixin:
             raise WFDNotReady("gst-launch-1.0 is required for the GStreamer WFD test-pattern pipeline.")
         if not _gst_wfd_sender_available():
             raise WFDNotReady(
-                "GStreamer WFD test-pattern pipeline needs mpegtsmux, rtpmp2tpay, and x264enc."
+                "GStreamer WFD test-pattern pipeline needs mpegtsmux, rtpmp2tpay, and "
+                "an H.264 encoder (x264enc, or openh264enc with h264parse)."
             )
+        h264_encoder = _gst_require_h264_encoder()
 
         resolution = _parse_resolution(self.config.output_resolution) or (1280, 720)
         width, height = resolution
@@ -104,8 +89,23 @@ class TestPatternMixin:
         # this smoke mode a misleading control while debugging #84.
         h264_parse_chain = (
             ["!", "h264parse", "config-interval=-1"]
-            if _gst_has_element("h264parse") else []
+            if h264_encoder == "openh264enc" or _gst_has_element("h264parse") else []
         )
+        if h264_encoder == "openh264enc":
+            encoder_args = _gst_openh264enc_args(bitrate_kbits, gop)
+        else:
+            encoder_args = [
+                "tune=zerolatency",
+                f"speed-preset={'ultrafast' if height > 1080 else 'veryfast'}",
+                f"bitrate={bitrate_kbits}",
+                f"key-int-max={gop}",
+                "bframes=0",
+                "byte-stream=true",
+                "aud=true",
+                f"threads={_x264_threads()}",
+                "sliced-threads=true",
+                "vbv-buf-capacity=200",
+            ]
 
         cmd = [
             "gst-launch-1.0", "-e", "-q",
@@ -126,19 +126,11 @@ class TestPatternMixin:
             "videotestsrc", "is-live=true", "pattern=smpte",
             "!", f"video/x-raw,width={width},height={height},framerate={self.config.fps}/1",
             "!", "videoconvert",
-            "!", "x264enc",
-            "tune=zerolatency",
-            f"speed-preset={'ultrafast' if height > 1080 else 'veryfast'}",
-            f"bitrate={bitrate_kbits}",
-            f"key-int-max={gop}",
-            "bframes=0",
-            "byte-stream=true",
-            "aud=true",
-            f"threads={_x264_threads()}",
-            "sliced-threads=true",
-            "vbv-buf-capacity=200",
+            "!", h264_encoder,
+            *encoder_args,
             *h264_parse_chain,
-            "!", f"video/x-h264,stream-format=byte-stream,alignment=au,profile={self.config.h264_profile}",
+            "!", "video/x-h264,stream-format=byte-stream,alignment=au,profile="
+            + _gst_h264_caps_profile(h264_encoder, self.config.h264_profile),
             "!", "queue",
             "!", "mux.sink_4113",
         ]
